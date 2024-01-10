@@ -157,10 +157,6 @@ def compare_disparities(prediction: np.ndarray, ground_truth: np.ndarray, segmen
         MAE_interior=AE_interior.mean(),
         MAE_boundary=AE_boundary.mean(),
 
-        # Mean Absolute Percentage Error
-        MAPE_interior=(AE_interior / gt_in).mean(),
-        MAPE_boundary=(AE_boundary / gt_boundary).mean(),
-
         # Root Mean Squared Error
         RMSE_interior=np.sqrt((AE_interior ** 2).mean()),
         RMSE_boundary=np.sqrt((AE_boundary ** 2).mean()),
@@ -202,7 +198,7 @@ def plot_results_graphs(test_res_csv):
     results = pd.concat([gray, colors], axis=1)
 
     # plot the results
-    metrics = ["BPR2", "BPR5", "MAE", "MAPE", "RMSE"]
+    metrics = ["BPR2", "BPR5", "MAE", "RMSE"]
     for metric in metrics:
         y = [f'{metric}_interior_gray', f'{metric}_boundary_gray',
              f'{metric}_interior_RGB', f'{metric}_boundary_RGB']
@@ -241,7 +237,7 @@ if __name__ == '__main__':
 
     scale_factor = 1
     window_sizes = [3, 5, 7, 9, 11, 13, 15, 17, 19, 21]
-    compute_all = False
+    compute_all = True
 
     # computes the disparities and compares the metrics for different window sizes
     # and both 3-channeled and gray scaled images

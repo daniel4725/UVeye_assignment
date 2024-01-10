@@ -216,5 +216,4 @@ def main(sections2run=('A', 'B', 'C'), scale_factor=1, load_saved_disparities=Fa
         save_disparity_map(disparity_map, disparity_map_path)
 
 if __name__ == '__main__':
-    # main(sections2run=('A', 'B', 'C'), scale_factor=1, load_saved_disparities=True)
-    main(sections2run=('C',), scale_factor=1, load_saved_disparities=True)
+    main(sections2run=('A', 'B', 'C'), scale_factor=1, load_saved_disparities=True)

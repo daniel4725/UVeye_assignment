@@ -4,6 +4,8 @@ import matplotlib.pyplot as plt
 import os
 from tqdm import tqdm
 import pandas as pd
+import threading
+from scipy import ndimage
 
 
 def compute_sad(right_image: np.ndarray, left_image: np.ndarray,
@@ -26,31 +28,38 @@ def compute_sad(right_image: np.ndarray, left_image: np.ndarray,
     half_window_size = window_size // 2
     height, width = left_image.shape[:2]
 
+    right_image, left_image = right_image.astype(np.float), left_image.astype(np.float)
     num_disparities = disparity_range[1] - disparity_range[0] + 1  # total number of disparities
     sad = np.full((height, width, num_disparities), np.inf)  # initialize the output SAD tensor
-    kernel = np.ones(shape=(window_size, window_size), dtype=left_image.dtype)  # convolution kernel for fast summation
+    kernel = np.ones(shape=(window_size, window_size))  # convolution kernel for fast summation
 
     # iterate over all the disparities
-    for disp_idx, disp in tqdm(enumerate(range(disparity_range[0], disparity_range[1] + 1))):
+    threads = []
+    for disp_idx, disp in enumerate(range(disparity_range[0], disparity_range[1] + 1)):
+        thread = threading.Thread(target=sad4disparity, args=(width, disp, disp_idx, kernel, half_window_size, sad, right_image, left_image))
+        thread.start()
+        threads.append(thread)
 
-        # calculate the absolute differance for the specific disparity
-        current_disp_abs_diff = np.abs(right_image[:, :width - disp] - left_image[:, disp:])
-
-        # sum the absolute differance for each block using convolution with the ones kernel
-        if current_disp_abs_diff.ndim == 3:  # if we are using 3 channels over sum all the channels
-            current_disp_SAD = my_convolve2d_fft(current_disp_abs_diff[:, :, 0], kernel)
-            current_disp_SAD += my_convolve2d_fft(current_disp_abs_diff[:, :, 1], kernel)
-            current_disp_SAD += my_convolve2d_fft(current_disp_abs_diff[:, :, 2], kernel)
-        else:   # if we are using gray scale
-            current_disp_SAD = my_convolve2d_fft(current_disp_abs_diff, kernel)
-
-        # crop edges (the values there are invalid)
-        current_disp_SAD = current_disp_SAD[half_window_size: - half_window_size, half_window_size: - half_window_size]
-
-        # insert to the sad tensor that contains all the disparities' SAD
-        sad[half_window_size: - half_window_size, half_window_size + disp: width - half_window_size, disp_idx] = current_disp_SAD
+    # Join all threads to wait for them to finish
+    for thread in tqdm(threads):
+        thread.join()
 
     return sad
+
+
+def sad4disparity(width, disp, disp_idx, kernel, half_window_size, sad, right_image, left_image):
+    # calculate the absolute differance for the specific disparity
+    current_disp_abs_diff = np.abs(right_image[:, :width - disp] - left_image[:, disp:])
+
+    # sum the absolute differance for each block using convolution with the ones kernel
+    current_disp_SAD = my_convolve2d_fft(current_disp_abs_diff, kernel)
+
+    # crop edges (the values there are invalid)
+    current_disp_SAD = current_disp_SAD[half_window_size: - half_window_size, half_window_size: - half_window_size]
+
+    # insert to the sad tensor that contains all the disparities' SAD
+    sad[half_window_size: - half_window_size, half_window_size + disp: width - half_window_size,
+    disp_idx] = current_disp_SAD
 
 
 def get_disparity_map_from_sad(sad: np.ndarray, lower_disparity_range: int) -> np.ndarray:
@@ -61,11 +70,19 @@ def get_disparity_map_from_sad(sad: np.ndarray, lower_disparity_range: int) -> n
     :param lower_disparity_range: the bottom disparity range used to compute the SAD tensor
     :return: disparity map
     """
+    partitioned_sad = np.partition(sad, 2, axis=2)
+    distances = abs(partitioned_sad[:, :, 2] - partitioned_sad[:, :, 1])
+    max_distances = distances[~ (np.isnan(distances) | np.isinf(distances))].max()
+    confidance_map = distances / max_distances
+    plt.matshow(confidance_map)
+    plt.title("Disparity Confidence Map")
+    plt.show()
+
     disparity = np.argmin(sad, axis=2).astype(np.float)
     # Replace indices with inf with nan
     min_values = np.min(sad, axis=2)
     disparity[min_values == np.inf] = np.nan
-    return disparity + lower_disparity_range
+    return ndimage.median_filter(disparity + lower_disparity_range, size=31)
 
 
 def my_convolve2d_fft(image: np.ndarray, kernel: np.ndarray) -> np.ndarray:
@@ -186,39 +203,35 @@ def plot_results_graphs(test_res_csv):
     and using gray scale or rgb in the SAD algorythm for disparity generation.
     """
     # merge the csv to have the RGB or grayscale information as part of each metric
-    gray = test_res_csv[test_res_csv["channels"] == "gray"]
-    gray.columns = [f"{col_name}_gray" if col_name not in ["channels", "win_size"] else col_name for col_name in gray.columns ]
-    gray = gray.reset_index(drop=True)
+    # gray = test_res_csv[test_res_csv["channels"] == "gray"]
+    # gray.columns = [f"{col_name}_gray" if col_name not in ["channels", "win_size"] else col_name for col_name in gray.columns ]
+    # gray = gray.reset_index(drop=True)
 
-    colors = test_res_csv[test_res_csv["channels"] == "RGB"]
-    colors.columns = [f"{col_name}_RGB" if col_name not in ["channels", "win_size"] else col_name for col_name in colors.columns ]
-    colors = colors.drop(columns=["channels", "win_size"])
-    colors = colors.reset_index(drop=True)
 
-    results = pd.concat([gray, colors], axis=1)
+    results = test_res_csv
 
     # plot the results
     metrics = ["BPR2", "BPR5", "MAE", "RMSE"]
     for metric in metrics:
-        y = [f'{metric}_interior_gray', f'{metric}_boundary_gray',
-             f'{metric}_interior_RGB', f'{metric}_boundary_RGB']
-        results.plot(x="win_size", y=y, kind='line', marker='o', color=['lightblue', 'blue', 'lightcoral', 'red'])
+        y = [f'{metric}_interior', f'{metric}_boundary']
+        results.plot(x="win_size", y=y, kind='line', marker='o', color=['lightblue', 'blue'])
 
         # Add labels and title
         plt.xlabel('window size')
         plt.ylabel(metric)
-        plt.title(f'{metric} as function of window size - RGB and gray scale')
+        plt.title(f'{metric} as function of window size')
         plt.show()
 
 
-    y = [f'combined_metric_gray', f'combined_metric_RGB']
+    y = [f'combined_metric']
     results.plot(x="win_size", y=y, kind='line', marker='o')
 
     # Add labels and title
     plt.xlabel('window size')
     plt.ylabel("combined metric")
-    plt.title(f'Combined metric as function of window size - RGB and gray scale')
+    plt.title(f'Combined metric as function of window size')
     plt.show()
+
 
 if __name__ == '__main__':
     from Helper_Functions import *
@@ -235,50 +248,47 @@ if __name__ == '__main__':
     left_image = cv2.imread(os.path.join(A_dir, 'left_image.png'))
     right_image = cv2.imread(os.path.join(A_dir, 'right_image.png'))
 
+
+    # tests_results = pd.read_csv(os.path.join(outputs_dir, 'A', 'tests_results.csv'))
+    # best_score_row = tests_results.loc[tests_results['combined_metric'].idxmin()]
+    # optimal_win_size = best_score_row["win_size"]
+    # plot_results_graphs(tests_results)
+
     scale_factor = 1
-    window_sizes = [3, 5, 7, 9, 11, 13, 15, 17, 19, 21]
+    window_sizes = [3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31, 33, 35, 37, 39, 41]
     compute_all = True
-
-    # computes the disparities and compares the metrics for different window sizes
-    # and both 3-channeled and gray scaled images
-    if compute_all:
-        for window_size in window_sizes:
-            # gray scale
-            sad = compute_sad(bgr2gray(right_image), bgr2gray(left_image), disparity_range, window_size=window_size)
-            disparity_map = get_disparity_map_from_sad(sad, disparity_range[0])
-            save_disparity_map(disparity_map, os.path.join(outputs_dir, 'A', 'saved_maps', f'scale{scale_factor}_gray_win{window_size}.pkl'))
-
-            # 3 channels
-            sad = compute_sad(right_image, left_image, disparity_range, window_size=window_size)
-            disparity_map = get_disparity_map_from_sad(sad, disparity_range[0])
-            save_disparity_map(disparity_map, os.path.join(outputs_dir, 'A', 'saved_maps', f'scale{scale_factor}_colors_win{window_size}.pkl'))
-
 
     # Create an empty DataFrame for the metrics
     path_gray = os.path.join('outputs', 'A', "disparity_SAD_win3.pkl")
     d = load_gt_disparity_image(path_gray)
     metrics = compare_disparities(d, left_disparity_GT, left_image_segmentation, display=False)
     metrics["win_size"] = 3
-    metrics["channels"] = 1
     df = pd.DataFrame(columns=list(metrics.keys()))
-
-    for window_size in tqdm(window_sizes):
-        path_gray = os.path.join('outputs', 'A', 'saved_maps', f"scale{scale_factor}_gray_win{window_size}.pkl")
-        d = load_gt_disparity_image(path_gray)
-        metrics = compare_disparities(d, left_disparity_GT, left_image_segmentation, display=False)
-        metrics["win_size"] = window_size
-        metrics["channels"] = "gray"
-        df = df.append(metrics, ignore_index=True)
-
-        path_colors = os.path.join('outputs', 'A', 'saved_maps', f"scale{scale_factor}_colors_win{window_size}.pkl")
-        d = load_gt_disparity_image(path_colors)
-        metrics = compare_disparities(d, left_disparity_GT, left_image_segmentation, display=False)
-        metrics["win_size"] = window_size
-        metrics["channels"] = "RGB"
-        df = df.append(metrics, ignore_index=True)
-
+    # computes the disparities and compares the metrics for different window sizes
     results_path = os.path.join(outputs_dir, 'A', 'tests_results.csv')
-    df.to_csv(results_path, index=False)
+
+    if compute_all:
+        for window_size in window_sizes:
+            # gray scale
+            sad = compute_sad(bgr2gray(right_image), bgr2gray(left_image), disparity_range, window_size=window_size)
+            disparity_map = get_disparity_map_from_sad(sad, disparity_range[0])
+            disparity_show(disparity_map)
+            save_disparity_map(disparity_map, os.path.join(outputs_dir, 'A', 'saved_maps', f'scale{scale_factor}_gray_win{window_size}.pkl'))
+
+            # path_gray = os.path.join('outputs', 'A', 'saved_maps', f"scale{scale_factor}_gray_win{window_size}.pkl")
+            # disparity_map = load_gt_disparity_image(path_gray)
+
+            metrics = compare_disparities(disparity_map, left_disparity_GT, left_image_segmentation, display=False)
+            metrics["win_size"] = window_size
+            df = df.append(metrics, ignore_index=True)
+            df.to_csv(results_path, index=False)
+
+        # path_gray = os.path.join('outputs', 'A', 'saved_maps', f"scale{scale_factor}_gray_win{27}.pkl")
+        # disparity_map = load_gt_disparity_image(path_gray)
+        # disparity_map = ndimage.median_filter(disparity_map, size=31)
+        # disparity_show(disparity_map)
+        # metrics = compare_disparities(disparity_map, left_disparity_GT, left_image_segmentation, display=True)
+        # print(f"win: {31} - {metrics['combined_metric']:.4f}")
 
 
     # scale_factor = 8
